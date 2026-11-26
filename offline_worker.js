@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const VERSION = 'v4';
+const VERSION = 'v6';
 const CACHE = 'kilometrage-pwa-' + VERSION;
 const SCOPE = self.registration.scope; // se termine par « / »
 const NETWORK_TIMEOUT_MS = 4000;
@@ -23,6 +23,7 @@ const CORE = [
   'main.dart.js',
   'manifest.json',
   'diag.html',
+  'ocr_prep.js',
   'version.json',
   'favicon.png',
   'icons/Icon-192.png',
