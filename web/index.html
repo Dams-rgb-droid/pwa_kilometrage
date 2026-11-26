@@ -111,66 +111,99 @@
     };
 
     function kmAbs(path) { return new URL(path, document.baseURI).href; }
-    function kmLoadScript(src) {
+    function kmLoadScript(src, isLoaded) {
       return new Promise(function (ok, ko) {
-        if (window.Tesseract) return ok();
+        if (isLoaded()) return ok();
         var s = document.createElement('script');
         s.src = src; s.onload = ok;
-        s.onerror = function () { ko(new Error('fichiers OCR introuvables (dossier web/ocr)')); };
+        s.onerror = function () { ko(new Error('fichier introuvable : ' + src)); };
         document.head.appendChild(s);
       });
     }
 
+    // Image -> niveaux de gris, plus grand côté = maxSide px (jamais agrandie).
+    function kmGrayCanvas(img, maxSide) {
+      var k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      var w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+      var canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
+      var data = ctx.getImageData(0, 0, w, h), px = data.data, gray = new Uint8Array(w * h);
+      for (var i = 0, j = 0; i < px.length; i += 4, j++) {
+        gray[j] = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
+      }
+      return { gray: gray, w: w, h: h };
+    }
+
+    // Niveaux de gris (noir sur blanc) -> canvas de 120 px de haut pour l'OCR.
+    function kmCropCanvas(crop) {
+      var src = document.createElement('canvas'); src.width = crop.width; src.height = crop.height;
+      var sctx = src.getContext('2d'), id = sctx.createImageData(crop.width, crop.height);
+      for (var i = 0; i < crop.data.length; i++) {
+        id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = crop.data[i]; id.data[i * 4 + 3] = 255;
+      }
+      sctx.putImageData(id, 0, 0);
+      var k = 120 / crop.height, out = document.createElement('canvas');
+      out.width = Math.max(1, Math.round(crop.width * k)); out.height = 120;
+      var octx = out.getContext('2d'); octx.imageSmoothingQuality = 'high';
+      octx.fillStyle = '#fff'; octx.fillRect(0, 0, out.width, out.height);
+      octx.drawImage(src, 0, 0, out.width, out.height);
+      return out;
+    }
+
+    function kmBestRun(text) {
+      var runs = (text || '').match(/\d{3,7}/g) || [], best = '';
+      runs.forEach(function (r) { if (r.length > best.length) best = r; });
+      return best;
+    }
+
     // Étape 2 : lecture. Retourne 'OK:12345', 'NONE' ou 'ERROR:message'.
     window.kmRecognizeOdometer = async function () {
+      var worker = null;
       try {
         var file = window.__kmPhoto; window.__kmPhoto = null;
         if (!file) return 'CANCEL';
 
         var url = URL.createObjectURL(file);
         var img = new Image(); img.src = url; await img.decode();
-        var k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
-        var w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k);
-        var canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
-        var ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
         URL.revokeObjectURL(url);
 
-        // Niveaux de gris + étirement du contraste (2 % – 98 %).
-        var data = ctx.getImageData(0, 0, w, h), px = data.data, hist = new Array(256).fill(0);
-        for (var i = 0; i < px.length; i += 4) {
-          var g = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
-          px[i] = px[i + 1] = px[i + 2] = g; hist[g]++;
-        }
-        var total = w * h, lo = 0, hi = 255, acc = 0;
-        for (lo = 0; lo < 255 && acc < total * 0.02; lo++) acc += hist[lo];
-        acc = 0;
-        for (hi = 255; hi > 0 && acc < total * 0.02; hi--) acc += hist[hi];
-        var span = Math.max(1, hi - lo);
-        for (var j = 0; j < px.length; j += 4) {
-          var v = Math.max(0, Math.min(255, Math.round((px[j] - lo) * 255 / span)));
-          px[j] = px[j + 1] = px[j + 2] = v;
-        }
-        ctx.putImageData(data, 0, 0);
-
-        await kmLoadScript(kmAbs('ocr/tesseract.min.js'));
-        var worker = await Tesseract.createWorker('eng', 1, {
+        await kmLoadScript(kmAbs('ocr_prep.js'), function () { return !!window.kmOcrPrep; });
+        await kmLoadScript(kmAbs('ocr/tesseract.min.js'), function () { return !!window.Tesseract; });
+        worker = await Tesseract.createWorker('eng', 1, {
           workerPath: kmAbs('ocr/worker.min.js'),
           corePath: kmAbs('ocr/'),
           langPath: kmAbs('ocr/lang'),
           gzip: true
         });
-        await worker.setParameters({
-          tessedit_char_whitelist: '0123456789',
-          tessedit_pageseg_mode: '6'
-        });
-        var result = await worker.recognize(canvas);
-        await worker.terminate();
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
 
-        var runs = (result.data.text || '').match(/\d{3,7}/g) || [];
-        var best = '';
-        runs.forEach(function (r) { if (r.length > best.length) best = r; });
+        // 1) Repère automatiquement la ligne de chiffres, la recadre et la lit.
+        var attempts = [[1000, 'light'], [1000, 'dark'], [1600, 'light']];
+        await worker.setParameters({ tessedit_pageseg_mode: '7' });
+        for (var n = 0; n < attempts.length; n++) {
+          var g = kmGrayCanvas(img, attempts[n][0]);
+          var crop = window.kmOcrPrep.findDigitRow(g.gray, g.w, g.h, attempts[n][1]);
+          if (!crop) continue;
+          var res = await worker.recognize(kmCropCanvas(crop));
+          var found = kmBestRun(res.data.text);
+          if (found) { await worker.terminate(); return 'OK:' + found; }
+        }
+
+        // 2) Secours : lecture de l'image entière.
+        var full = kmGrayCanvas(img, 1600);
+        var c = document.createElement('canvas'); c.width = full.w; c.height = full.h;
+        var cctx = c.getContext('2d'), fid = cctx.createImageData(full.w, full.h);
+        for (var i = 0; i < full.gray.length; i++) {
+          fid.data[i * 4] = fid.data[i * 4 + 1] = fid.data[i * 4 + 2] = full.gray[i]; fid.data[i * 4 + 3] = 255;
+        }
+        cctx.putImageData(fid, 0, 0);
+        await worker.setParameters({ tessedit_pageseg_mode: '6' });
+        var all = await worker.recognize(c);
+        await worker.terminate();
+        var best = kmBestRun(all.data.text);
         return best ? 'OK:' + best : 'NONE';
       } catch (e) {
+        try { if (worker) await worker.terminate(); } catch (_) {}
         return 'ERROR:' + (e && e.message ? e.message : e);
       }
     };
