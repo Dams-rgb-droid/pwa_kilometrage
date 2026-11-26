@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const VERSION = 'v2';
+const VERSION = 'v4';
 const CACHE = 'kilometrage-pwa-' + VERSION;
 const SCOPE = self.registration.scope; // se termine par « / »
 const NETWORK_TIMEOUT_MS = 4000;
@@ -22,6 +22,7 @@ const CORE = [
   'flutter_bootstrap.js',
   'main.dart.js',
   'manifest.json',
+  'diag.html',
   'version.json',
   'favicon.png',
   'icons/Icon-192.png',
@@ -40,6 +41,9 @@ const CORE = [
   'assets/shaders/stretch_effect.frag',
   'canvaskit/canvaskit.js',
   'canvaskit/canvaskit.wasm',
+  // Variante utilisée par Chrome / Edge / Android
+  'canvaskit/chromium/canvaskit.js',
+  'canvaskit/chromium/canvaskit.wasm',
 ];
 
 self.addEventListener('install', (event) => {
@@ -73,9 +77,15 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(networkFirst(event, request));
 });
 
+function isAppShell(request) {
+  const u = new URL(request.url);
+  const base = new URL(SCOPE).pathname;
+  return request.mode === 'navigate' && (u.pathname === base || u.pathname === base + 'index.html');
+}
+
 function cacheKey(request) {
-  // Toutes les navigations (accueil, index.html, ?paramètres) = même page.
-  if (request.mode === 'navigate') return SCOPE;
+  // Accueil, index.html ou ?paramètres = même page.
+  if (isAppShell(request)) return SCOPE;
   return request.url;
 }
 
@@ -86,12 +96,14 @@ function isCacheable(response) {
 async function networkFirst(event, request) {
   const cache = await caches.open(CACHE);
   const key = cacheKey(request);
-  const isNavigation = request.mode === 'navigate';
+  const isNavigation = isAppShell(request);
 
   const network = (async () => {
     const fresh = isNavigation
       ? await fetch(new Request(SCOPE, { cache: 'no-cache' }))
-      : await fetch(request, { cache: 'no-cache' });
+      : request.mode === 'navigate'
+        ? await fetch(request)
+        : await fetch(request, { cache: 'no-cache' });
     if (isCacheable(fresh)) {
       const copy = fresh.clone();
       event.waitUntil(cache.put(key, copy).catch(() => {}));

@@ -197,8 +197,11 @@
       var b = document.getElementById('boot'); if (b) b.remove();
       // Demande à iOS de ne pas purger les données locales (relevés).
       try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
-      // Mémorise pour le mode hors ligne tout ce que l'application a chargé.
-      setTimeout(reportResources, 1500);
+    });
+    // Mémorise pour le mode hors ligne tout ce que l'application a chargé.
+    // Plusieurs passages, sans dépendre de l'événement de premier affichage.
+    window.addEventListener('load', function () {
+      [3000, 8000, 20000].forEach(function (d) { setTimeout(reportResources, d); });
     });
 
     function reportResources() {

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnostic hors ligne</title>
+<style>
+body{font:16px/1.45 -apple-system,sans-serif;margin:16px;color:#222;background:#f5f7fc}
+h1{font-size:20px} .ok{color:#16836b} .ko{color:#c0392b} pre{white-space:pre-wrap;word-break:break-all;background:#fff;padding:12px;border-radius:12px}
+button{padding:10px 14px;border:0;border-radius:12px;background:#3157c8;color:#fff;font-weight:600;margin:4px 4px 4px 0}
+</style></head><body>
+<h1>Diagnostic hors ligne</h1>
+<div id="out">Analyse…</div>
+<p><button id="reset">Vider cache et service worker</button><button id="again">Relancer</button></p>
+<script>
+const out = document.getElementById('out');
+const line = (ok, t) => out.insertAdjacentHTML('beforeend', `<div class="${ok ? 'ok' : 'ko'}">${ok ? '✔' : '✘'} ${t}</div>`);
+async function run() {
+  out.innerHTML = '';
+  line(navigator.onLine, 'Réseau : ' + (navigator.onLine ? 'en ligne' : 'hors ligne'));
+  line(!!navigator.standalone, 'Mode : ' + (navigator.standalone ? 'application écran d’accueil' : 'onglet Safari'));
+  line(location.protocol === 'https:', 'Adresse : ' + location.href);
+  if (!('serviceWorker' in navigator)) { line(false, 'Service worker non disponible (HTTPS requis)'); return; }
+  const regs = await navigator.serviceWorker.getRegistrations();
+  line(regs.length > 0, 'Service worker enregistré : ' + regs.map(r => (r.active ? r.active.scriptURL : 'en attente') + ' [' + r.scope + ']').join(', '));
+  line(!!navigator.serviceWorker.controller, 'Cette page est contrôlée par le service worker');
+  const keys = await caches.keys();
+  line(keys.length > 0, 'Caches : ' + (keys.join(', ') || 'aucun'));
+  const base = new URL('./', location.href).href;
+  const must = ['', 'index.html', 'main.dart.js', 'flutter_bootstrap.js', 'manifest.json', 'canvaskit/canvaskit.js', 'canvaskit/canvaskit.wasm', 'assets/AssetManifest.bin.json', 'assets/FontManifest.json', 'assets/assets/fonts/Roboto-Regular.ttf'];
+  for (const m of must) {
+    let found = false;
+    for (const k of keys) { const c = await caches.open(k); if (await c.match(base + m, { ignoreSearch: true })) found = true; }
+    line(found, 'En cache : ' + (m || '(page d’accueil)'));
+  }
+  let total = 0;
+  for (const k of keys) total += (await (await caches.open(k)).keys()).length;
+  out.insertAdjacentHTML('beforeend', '<pre>' + total + ' fichiers en cache.\nCapture d’écran de cette page = très utile pour le diagnostic.</pre>');
+}
+document.getElementById('again').onclick = run;
+document.getElementById('reset').onclick = async () => {
+  (await navigator.serviceWorker.getRegistrations()).forEach(r => r.unregister());
+  (await caches.keys()).forEach(k => caches.delete(k));
+  setTimeout(run, 500);
+};
+run();
+</script></body></html>
