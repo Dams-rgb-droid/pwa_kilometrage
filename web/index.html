@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Suivi des kilomètres professionnels et privés.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+
+  <!-- iOS : application plein écran lancée depuis l'écran d'accueil -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Kilométrage">
+  <meta name="theme-color" content="#F5F7FC">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="manifest" href="manifest.json">
+  <title>Kilométrage Pro</title>
+
+  <style>
+    html { height: 100%; background: #F5F7FC; overscroll-behavior: none; }
+    body { margin: 0; height: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+    #boot {
+      position: fixed; inset: 0; z-index: -1;
+      display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #3157C8;
+    }
+    #boot .spin {
+      width: 34px; height: 34px; border-radius: 50%;
+      border: 3px solid #d5dcf2; border-top-color: #3157C8;
+      animation: kmspin 0.9s linear infinite;
+    }
+    @keyframes kmspin { to { transform: rotate(360deg); } }
+    #recovery {
+      position: fixed; left: 16px; right: 16px; bottom: 24px; z-index: 2147483647;
+      padding: 14px 16px; border-radius: 16px; background: #fff;
+      box-shadow: 0 6px 24px rgba(0,0,0,.18); font: 15px/1.4 -apple-system, sans-serif; color: #222;
+      display: none;
+    }
+    #recovery button {
+      margin-top: 10px; padding: 10px 16px; border: 0; border-radius: 12px;
+      background: #3157C8; color: #fff; font: 600 15px -apple-system, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="boot"><div class="spin"></div></div>
+  <div id="recovery">
+    Le chargement est plus long que prévu.
+    <br><button id="recovery-btn" type="button">Réparer et recharger</button>
+  </div>
+
+  <script>
+    // ---- Partage de fichier (iPhone : le téléchargement classique ne marche pas
+    // dans une application ajoutée à l'écran d'accueil) ---------------------------
+    window.kmShareFile = async function (name, mime, bytes) {
+      try {
+        const file = new File([bytes], name, { type: mime });
+        if (!navigator.share || !navigator.canShare || !navigator.canShare({ files: [file] })) {
+          return 'unsupported';
+        }
+        await navigator.share({ files: [file], title: name });
+        return 'shared';
+      } catch (e) {
+        return e && e.name === 'AbortError' ? 'cancelled' : 'unsupported';
+      }
+    };
+
+    // ---- Choix d'un fichier texte (restauration de sauvegarde) ----------------------
+    window.kmPickTextFile = function () {
+      return new Promise(function (resolve) {
+        var input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json,text/plain';
+        input.style.display = 'none';
+        function done(text) { resolve(text); input.remove(); }
+        input.addEventListener('change', function () {
+          var f = input.files && input.files[0];
+          if (!f) return done('');
+          f.text().then(done, function () { done(''); });
+        });
+        input.addEventListener('cancel', function () { done(''); });
+        document.body.appendChild(input);
+        input.click();
+      });
+    };
+
+    // ---- Lecture du compteur sur une photo (OCR sur l'appareil, Tesseract.js) -------
+    // Étape 1 : choix / prise de la photo (doit suivre directement un toucher).
+    window.kmPickPhoto = function () {
+      return new Promise(function (resolve) {
+        var input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.setAttribute('capture', 'environment');
+        input.style.display = 'none';
+        function done(v) { resolve(v); input.remove(); }
+        input.addEventListener('change', function () {
+          var f = input.files && input.files[0];
+          if (!f) return done('CANCEL');
+          window.__kmPhoto = f;
+          done('OK');
+        });
+        input.addEventListener('cancel', function () { done('CANCEL'); });
+        document.body.appendChild(input);
+        input.click();
+      });
+    };
+
+    function kmAbs(path) { return new URL(path, document.baseURI).href; }
+    function kmLoadScript(src) {
+      return new Promise(function (ok, ko) {
+        if (window.Tesseract) return ok();
+        var s = document.createElement('script');
+        s.src = src; s.onload = ok;
+        s.onerror = function () { ko(new Error('fichiers OCR introuvables (dossier web/ocr)')); };
+        document.head.appendChild(s);
+      });
+    }
+
+    // Étape 2 : lecture. Retourne 'OK:12345', 'NONE' ou 'ERROR:message'.
+    window.kmRecognizeOdometer = async function () {
+      try {
+        var file = window.__kmPhoto; window.__kmPhoto = null;
+        if (!file) return 'CANCEL';
+
+        var url = URL.createObjectURL(file);
+        var img = new Image(); img.src = url; await img.decode();
+        var k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+        var w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k);
+        var canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+        var ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+
+        // Niveaux de gris + étirement du contraste (2 % – 98 %).
+        var data = ctx.getImageData(0, 0, w, h), px = data.data, hist = new Array(256).fill(0);
+        for (var i = 0; i < px.length; i += 4) {
+          var g = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
+          px[i] = px[i + 1] = px[i + 2] = g; hist[g]++;
+        }
+        var total = w * h, lo = 0, hi = 255, acc = 0;
+        for (lo = 0; lo < 255 && acc < total * 0.02; lo++) acc += hist[lo];
+        acc = 0;
+        for (hi = 255; hi > 0 && acc < total * 0.02; hi--) acc += hist[hi];
+        var span = Math.max(1, hi - lo);
+        for (var j = 0; j < px.length; j += 4) {
+          var v = Math.max(0, Math.min(255, Math.round((px[j] - lo) * 255 / span)));
+          px[j] = px[j + 1] = px[j + 2] = v;
+        }
+        ctx.putImageData(data, 0, 0);
+
+        await kmLoadScript(kmAbs('ocr/tesseract.min.js'));
+        var worker = await Tesseract.createWorker('eng', 1, {
+          workerPath: kmAbs('ocr/worker.min.js'),
+          corePath: kmAbs('ocr/'),
+          langPath: kmAbs('ocr/lang'),
+          gzip: true
+        });
+        await worker.setParameters({
+          tessedit_char_whitelist: '0123456789',
+          tessedit_pageseg_mode: '6'
+        });
+        var result = await worker.recognize(canvas);
+        await worker.terminate();
+
+        var runs = (result.data.text || '').match(/\d{3,7}/g) || [];
+        var best = '';
+        runs.forEach(function (r) { if (r.length > best.length) best = r; });
+        return best ? 'OK:' + best : 'NONE';
+      } catch (e) {
+        return 'ERROR:' + (e && e.message ? e.message : e);
+      }
+    };
+
+    // ---- Réparation : supprime service workers + caches puis recharge ------------
+    async function resetApp() {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(function (r) { return r.unregister(); }));
+        const keys = await caches.keys();
+        await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+      } catch (e) {}
+      location.reload();
+    }
+    document.getElementById('recovery-btn').addEventListener('click', resetApp);
+    var recoveryTimer = setTimeout(function () {
+      document.getElementById('recovery').style.display = 'block';
+    }, 20000);
+
+    // ---- Premier affichage ----------------------------------------------------------
+    window.addEventListener('flutter-first-frame', function () {
+      clearTimeout(recoveryTimer);
+      var r = document.getElementById('recovery'); if (r) r.remove();
+      var b = document.getElementById('boot'); if (b) b.remove();
+      // Demande à iOS de ne pas purger les données locales (relevés).
+      try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+      // Mémorise pour le mode hors ligne tout ce que l'application a chargé.
+      setTimeout(reportResources, 1500);
+    });
+
+    function reportResources() {
+      if (!('serviceWorker' in navigator)) return;
+      var urls = performance.getEntriesByType('resource').map(function (e) { return e.name; });
+      urls.push(location.href);
+      navigator.serviceWorker.ready.then(function (reg) {
+        var sw = reg.active || navigator.serviceWorker.controller;
+        if (sw) sw.postMessage({ type: 'CACHE_URLS', urls: urls });
+      }).catch(function () {});
+    }
+
+    // ---- Service worker (HTTPS ou localhost uniquement) -----------------------------
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('offline_worker.js').then(function (reg) {
+          reg.update().catch(function () {});
+        }).catch(function (e) { console.warn('Service worker non enregistré', e); });
+      });
+    }
+  </script>
+  <script>{{flutter_bootstrap_js}}</script>
+</body>
+</html>
